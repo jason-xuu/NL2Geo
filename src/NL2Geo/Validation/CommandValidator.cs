@@ -18,6 +18,7 @@ public sealed class CommandValidator : ICommandValidator
     {
         var errors = new List<string>();
         var warnings = new List<string>();
+        var createsGeometryInBatch = false;
 
         if (operations.Count == 0)
         {
@@ -39,14 +40,27 @@ public sealed class CommandValidator : ICommandValidator
                 operation.Type.Equals("rotate", StringComparison.OrdinalIgnoreCase) ||
                 operation.Type.Equals("scale", StringComparison.OrdinalIgnoreCase))
             {
-                if (!commandAdapter.HasSelection())
+                if (!commandAdapter.HasSelection() && !createsGeometryInBatch)
                 {
-                    errors.Add($"Operation '{operation.Type}' requires selected objects, but selection is empty.");
+                    errors.Add($"Operation '{operation.Type}' requires selected objects, but selection is empty and no prior create_* operation exists in this prompt.");
+                }
+            }
+
+            if (operation.Type.StartsWith("array_", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!commandAdapter.HasSelection() && !createsGeometryInBatch)
+                {
+                    errors.Add($"Operation '{operation.Type}' requires selected objects, but selection is empty and no prior create_* operation exists in this prompt.");
                 }
             }
 
             ValidateNumericRanges(operation, errors, warnings);
             ValidateConflicts(operation, errors);
+
+            if (operation.Type.StartsWith("create_", StringComparison.OrdinalIgnoreCase))
+            {
+                createsGeometryInBatch = true;
+            }
         }
 
         return new ValidationResult(errors.Count == 0, errors, warnings);

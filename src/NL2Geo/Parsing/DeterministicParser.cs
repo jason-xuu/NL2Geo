@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace NL2Geo.Parsing;
@@ -20,19 +22,70 @@ public sealed class DeterministicParser : IPromptParser
             return Task.FromResult(new ParseResult(false, ops, warnings, "Unsupported operation request."));
         }
 
-        var dims = ExtractNumbers(normalized);
-
-        if (normalized.Contains("cube"))
+        var clauses = SplitIntoClauses(normalized);
+        foreach (var clause in clauses)
         {
-            var size = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 5;
+            ops.AddRange(ParseClause(clause, warnings));
+        }
+
+        if (ops.Count == 0)
+        {
+            return Task.FromResult(new ParseResult(false, ops, warnings, "Could not parse prompt with deterministic parser."));
+        }
+
+        return Task.FromResult(new ParseResult(true, ops, warnings));
+    }
+
+    private static List<string> SplitIntoClauses(string normalized)
+    {
+        var s = normalized;
+        s = Regex.Replace(s, @"[,;]", " then ");
+        s = Regex.Replace(s, @"\band\s+then\b", " then ");
+        s = Regex.Replace(s, @"\bthen\b", " then ");
+        s = Regex.Replace(
+            s,
+            @"\band\s+(?=(?:move|rotate|scale|create|make|generate|array|grid)\b)",
+            " then ");
+
+        return s.Split(" then ", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+    }
+
+    private static IEnumerable<GeometryOperation> ParseClause(string clause, List<string> warnings)
+    {
+        var dims = ExtractNumbers(clause);
+        var ops = new List<GeometryOperation>();
+
+        // Combined create + grid prompt ("create a 3x3 grid of boxes")
+        if (clause.Contains("grid") && (clause.Contains("box") || clause.Contains("cube")))
+        {
+            var (cx, cy) = ExtractGridCounts(clause);
+            var size = dims.FirstOrDefault(d => d > 0);
+            if (size <= 0) size = 4;
             ops.Add(new GeometryOperation("create_box", new Dictionary<string, object>
             {
                 ["width"] = size,
                 ["height"] = size,
                 ["depth"] = size
             }));
+            ops.Add(new GeometryOperation("array_grid", new Dictionary<string, object>
+            {
+                ["count_x"] = cx,
+                ["count_y"] = cy,
+                ["spacing"] = Math.Max(size * 1.5, 5.0)
+            }));
+            return ops;
         }
-        else if (normalized.Contains("box"))
+
+        if (clause.Contains("cube"))
+        {
+            var size = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 5;
+            ops.Add(new GeometryOperation("create_box", new Dictionary<string, object>
+            {
+                ["width"] = size, ["height"] = size, ["depth"] = size
+            }));
+        }
+        else if (clause.Contains("box"))
         {
             var width = dims.ElementAtOrDefault(0);
             var height = dims.ElementAtOrDefault(1);
@@ -48,20 +101,15 @@ public sealed class DeterministicParser : IPromptParser
 
             ops.Add(new GeometryOperation("create_box", new Dictionary<string, object>
             {
-                ["width"] = width,
-                ["height"] = height,
-                ["depth"] = depth
+                ["width"] = width, ["height"] = height, ["depth"] = depth
             }));
         }
-        else if (normalized.Contains("sphere") || normalized.Contains("ball") || normalized.Contains("orb"))
+        else if (clause.Contains("sphere") || clause.Contains("ball") || clause.Contains("orb"))
         {
             var radius = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 2;
-            ops.Add(new GeometryOperation("create_sphere", new Dictionary<string, object>
-            {
-                ["radius"] = radius
-            }));
+            ops.Add(new GeometryOperation("create_sphere", new Dictionary<string, object> { ["radius"] = radius }));
         }
-        else if (normalized.Contains("cylinder") || normalized.Contains("tube") || normalized.Contains("pipe"))
+        else if (clause.Contains("cylinder") || clause.Contains("tube") || clause.Contains("pipe"))
         {
             ops.Add(new GeometryOperation("create_cylinder", new Dictionary<string, object>
             {
@@ -69,7 +117,7 @@ public sealed class DeterministicParser : IPromptParser
                 ["height"] = dims.ElementAtOrDefault(1) > 0 ? dims[1] : 6
             }));
         }
-        else if (normalized.Contains("cone"))
+        else if (clause.Contains("cone"))
         {
             ops.Add(new GeometryOperation("create_cone", new Dictionary<string, object>
             {
@@ -77,7 +125,7 @@ public sealed class DeterministicParser : IPromptParser
                 ["height"] = dims.ElementAtOrDefault(1) > 0 ? dims[1] : 6
             }));
         }
-        else if (normalized.Contains("torus") || normalized.Contains("donut") || normalized.Contains("ring"))
+        else if (clause.Contains("torus") || clause.Contains("donut") || clause.Contains("ring"))
         {
             ops.Add(new GeometryOperation("create_torus", new Dictionary<string, object>
             {
@@ -85,7 +133,7 @@ public sealed class DeterministicParser : IPromptParser
                 ["minor_radius"] = dims.ElementAtOrDefault(1) > 0 ? dims[1] : 1
             }));
         }
-        else if (normalized.Contains("pyramid"))
+        else if (clause.Contains("pyramid"))
         {
             ops.Add(new GeometryOperation("create_pyramid", new Dictionary<string, object>
             {
@@ -94,7 +142,7 @@ public sealed class DeterministicParser : IPromptParser
                 ["height"] = dims.ElementAtOrDefault(2) > 0 ? dims[2] : 5
             }));
         }
-        else if (normalized.Contains("ellipsoid"))
+        else if (clause.Contains("ellipsoid"))
         {
             ops.Add(new GeometryOperation("create_ellipsoid", new Dictionary<string, object>
             {
@@ -103,36 +151,32 @@ public sealed class DeterministicParser : IPromptParser
                 ["radius_z"] = dims.ElementAtOrDefault(2) > 0 ? dims[2] : 1
             }));
         }
-        else if (normalized.Contains("circle"))
+        else if (clause.Contains("circle"))
         {
             ops.Add(new GeometryOperation("create_circle", new Dictionary<string, object>
             {
                 ["radius"] = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 2
             }));
         }
-        else if (normalized.Contains("rectangle") || normalized.Contains("square"))
+        else if (clause.Contains("rectangle") || clause.Contains("square"))
         {
             var width = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 5;
-            var height = normalized.Contains("square") ? width : (dims.ElementAtOrDefault(1) > 0 ? dims[1] : width);
+            var height = clause.Contains("square") ? width : (dims.ElementAtOrDefault(1) > 0 ? dims[1] : width);
             ops.Add(new GeometryOperation("create_rectangle", new Dictionary<string, object>
             {
-                ["width"] = width,
-                ["height"] = height
+                ["width"] = width, ["height"] = height
             }));
         }
-        else if (normalized.Contains("line"))
+        else if (clause.Contains("line"))
         {
             ops.Add(new GeometryOperation("create_line", new Dictionary<string, object>
             {
-                ["x1"] = 0d,
-                ["y1"] = 0d,
-                ["z1"] = 0d,
+                ["x1"] = 0d, ["y1"] = 0d, ["z1"] = 0d,
                 ["x2"] = dims.ElementAtOrDefault(0) > 0 ? dims[0] : 10d,
-                ["y2"] = 0d,
-                ["z2"] = 0d
+                ["y2"] = 0d, ["z2"] = 0d
             }));
         }
-        else if (normalized.Contains("point"))
+        else if (clause.Contains("point"))
         {
             ops.Add(new GeometryOperation("create_point", new Dictionary<string, object>
             {
@@ -141,28 +185,65 @@ public sealed class DeterministicParser : IPromptParser
                 ["z"] = dims.ElementAtOrDefault(2)
             }));
         }
-        else if (normalized.Contains("move"))
+        else if (clause.Contains("move"))
         {
             var amount = dims.ElementAtOrDefault(0);
             if (amount == 0) amount = 10;
-            ops.Add(new GeometryOperation("move", new Dictionary<string, object> { ["x"] = amount, ["y"] = 0d, ["z"] = 0d }));
+            var x = 0d; var y = 0d; var z = 0d;
+            if (Regex.IsMatch(clause, @"\bup\b")) z = amount;
+            else if (Regex.IsMatch(clause, @"\bdown\b")) z = -amount;
+            else if (Regex.IsMatch(clause, @"\bleft\b")) x = -amount;
+            else if (Regex.IsMatch(clause, @"\bright\b")) x = amount;
+            else if (Regex.IsMatch(clause, @"\bin\s*x\b")) x = amount;
+            else if (Regex.IsMatch(clause, @"\bin\s*y\b")) y = amount;
+            else if (Regex.IsMatch(clause, @"\bin\s*z\b")) z = amount;
+            else x = amount;
+            ops.Add(new GeometryOperation("move", new Dictionary<string, object> { ["x"] = x, ["y"] = y, ["z"] = z }));
         }
-        else if (normalized.Contains("rotate"))
+        else if (clause.Contains("rotate"))
         {
             var angle = dims.ElementAtOrDefault(0);
             if (angle == 0) angle = 45;
-            ops.Add(new GeometryOperation("rotate", new Dictionary<string, object> { ["degrees"] = angle, ["axis"] = "z" }));
+            var axis = "z";
+            if (Regex.IsMatch(clause, @"(around|about)\s*x|\bx[- ]axis\b")) axis = "x";
+            else if (Regex.IsMatch(clause, @"(around|about)\s*y|\by[- ]axis\b")) axis = "y";
+            ops.Add(new GeometryOperation("rotate", new Dictionary<string, object> { ["degrees"] = angle, ["axis"] = axis }));
         }
-        else if (normalized.Contains("grid"))
+        else if (clause.Contains("grid"))
         {
-            ops.Add(new GeometryOperation("array_grid", new Dictionary<string, object> { ["count_x"] = 3, ["count_y"] = 3, ["spacing"] = 5d }));
-        }
-        else
-        {
-            return Task.FromResult(new ParseResult(false, ops, warnings, "Could not parse prompt with deterministic parser."));
+            var (cx, cy) = ExtractGridCounts(clause);
+            if (clause.Contains("create") || clause.Contains("make") || clause.Contains("generate"))
+            {
+                ops.Add(new GeometryOperation("create_box", new Dictionary<string, object>
+                {
+                    ["width"] = 4d, ["height"] = 4d, ["depth"] = 4d
+                }));
+            }
+            ops.Add(new GeometryOperation("array_grid", new Dictionary<string, object>
+            {
+                ["count_x"] = cx, ["count_y"] = cy, ["spacing"] = 5d
+            }));
         }
 
-        return Task.FromResult(new ParseResult(true, ops, warnings));
+        return ops;
+    }
+
+    private static (int x, int y) ExtractGridCounts(string clause)
+    {
+        var by = Regex.Match(clause, @"(\d+)\s*(?:x|by)\s*(\d+)");
+        if (by.Success &&
+            int.TryParse(by.Groups[1].Value, out var a) &&
+            int.TryParse(by.Groups[2].Value, out var b))
+        {
+            return (Math.Max(1, a), Math.Max(1, b));
+        }
+        var single = ExtractNumbers(clause).FirstOrDefault(n => n > 0);
+        if (single > 0)
+        {
+            var c = Math.Max(1, (int)Math.Round(single));
+            return (c, c);
+        }
+        return (3, 3);
     }
 
     private static List<double> ExtractNumbers(string input)

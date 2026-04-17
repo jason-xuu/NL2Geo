@@ -37,4 +37,20 @@ public sealed class ValidatorTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Contains("requires selected objects"));
     }
+
+    [Fact]
+    public void Validator_AllowsTransformAfterCreateInSamePrompt()
+    {
+        var validator = new CommandValidator();
+        var adapter = new RhinoCommandAdapter { SelectionPresent = false };
+        var ops = new List<GeometryOperation>
+        {
+            new("create_box", new Dictionary<string, object> { ["width"] = 4d, ["height"] = 4d, ["depth"] = 4d }),
+            new("move", new Dictionary<string, object> { ["x"] = 10d, ["y"] = 0d, ["z"] = 0d }),
+            new("rotate", new Dictionary<string, object> { ["degrees"] = 45d, ["axis"] = "z" })
+        };
+
+        var result = validator.Validate(ops, adapter);
+        Assert.True(result.IsValid);
+    }
 }

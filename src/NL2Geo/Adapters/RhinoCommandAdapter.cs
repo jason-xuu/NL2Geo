@@ -19,12 +19,19 @@ public interface IRhinoCommandAdapter
     Guid? AddRectangle(double width, double height);
     Guid? AddLine(double x1, double y1, double z1, double x2, double y2, double z2);
     Guid? AddPoint(double x, double y, double z);
+    void MoveActive(double x, double y, double z);
+    void RotateActive(double degrees, string axis);
+    void ScaleActive(double factor);
+    void ArrayLinearActive(int count, double spacing, string axis);
+    void ArrayGridActive(int countX, int countY, double spacing);
+    void ArrayPolarActive(int count, double radius);
     void Redraw();
 }
 
 public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
 {
     private readonly Rhino.RhinoDoc _doc;
+    private readonly HashSet<Guid> _activeObjectIds = new();
 
     public RhinoRuntimeCommandAdapter(Rhino.RhinoDoc doc)
     {
@@ -45,7 +52,7 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var max = new Point3d(half.X, half.Y, depth);
         var box = new Box(Plane.WorldXY, new BoundingBox(min, max));
         var id = _doc.Objects.AddBox(box);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddCylinder(double radius, double height)
@@ -54,14 +61,14 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var cyl = new Cylinder(circle, height);
         var brep = cyl.ToBrep(true, true);
         var id = _doc.Objects.AddBrep(brep);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddSphere(double radius)
     {
         var sphere = new Sphere(Point3d.Origin, radius);
         var id = _doc.Objects.AddSphere(sphere);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddCone(double radius, double height)
@@ -70,7 +77,7 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var cone = new Cone(basePlane, -height, radius);
         var brep = cone.ToBrep(true);
         var id = _doc.Objects.AddBrep(brep);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddTorus(double majorRadius, double minorRadius)
@@ -79,7 +86,7 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var revSurface = torus.ToRevSurface();
         var brep = Brep.CreateFromRevSurface(revSurface, true, true);
         var id = _doc.Objects.AddBrep(brep);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddPyramid(double baseWidth, double baseDepth, double height)
@@ -105,7 +112,7 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         {
             id = _doc.Objects.AddBrep(brep);
         }
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddEllipsoid(double radiusX, double radiusY, double radiusZ)
@@ -115,14 +122,14 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var scale = Transform.Scale(Plane.WorldXY, radiusX, radiusY, radiusZ);
         brep.Transform(scale);
         var id = _doc.Objects.AddBrep(brep);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddCircle(double radius)
     {
         var circle = new Circle(Plane.WorldXY, radius);
         var id = _doc.Objects.AddCircle(circle);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddRectangle(double width, double height)
@@ -131,20 +138,170 @@ public sealed class RhinoRuntimeCommandAdapter : IRhinoCommandAdapter
         var hh = height / 2.0;
         var rect = new Rectangle3d(Plane.WorldXY, new Point3d(-hw, -hh, 0), new Point3d(hw, hh, 0));
         var id = _doc.Objects.AddPolyline(rect.ToPolyline());
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddLine(double x1, double y1, double z1, double x2, double y2, double z2)
     {
         var line = new Line(new Point3d(x1, y1, z1), new Point3d(x2, y2, z2));
         var id = _doc.Objects.AddLine(line);
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
     }
 
     public Guid? AddPoint(double x, double y, double z)
     {
         var id = _doc.Objects.AddPoint(new Point3d(x, y, z));
-        return id == Guid.Empty ? null : id;
+        return TrackNew(id);
+    }
+
+    public void MoveActive(double x, double y, double z)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0) return;
+        var xform = Transform.Translation(x, y, z);
+        ApplyTransform(ids, xform);
+    }
+
+    public void RotateActive(double degrees, string axis)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0) return;
+        var radians = Rhino.RhinoMath.ToRadians(degrees);
+        var axisVector = axis.ToLowerInvariant() switch
+        {
+            "x" => Vector3d.XAxis,
+            "y" => Vector3d.YAxis,
+            _ => Vector3d.ZAxis
+        };
+        var center = GetSelectionCenter(ids);
+        var xform = Transform.Rotation(radians, axisVector, center);
+        ApplyTransform(ids, xform);
+    }
+
+    public void ScaleActive(double factor)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0) return;
+        var center = GetSelectionCenter(ids);
+        var xform = Transform.Scale(center, factor);
+        ApplyTransform(ids, xform);
+    }
+
+    public void ArrayLinearActive(int count, double spacing, string axis)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0 || count <= 1) return;
+        var dir = axis.ToLowerInvariant() switch
+        {
+            "y" => Vector3d.YAxis,
+            "z" => Vector3d.ZAxis,
+            _ => Vector3d.XAxis
+        };
+        var newIds = new List<Guid>();
+        for (var i = 1; i < count; i++)
+        {
+            var xform = Transform.Translation(dir * (spacing * i));
+            newIds.AddRange(DuplicateWithTransform(ids, xform));
+        }
+        SetActive(ids.Concat(newIds));
+    }
+
+    public void ArrayGridActive(int countX, int countY, double spacing)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0 || countX <= 0 || countY <= 0) return;
+        var newIds = new List<Guid>();
+        for (var ix = 0; ix < countX; ix++)
+        {
+            for (var iy = 0; iy < countY; iy++)
+            {
+                if (ix == 0 && iy == 0) continue;
+                var xform = Transform.Translation(ix * spacing, iy * spacing, 0);
+                newIds.AddRange(DuplicateWithTransform(ids, xform));
+            }
+        }
+        SetActive(ids.Concat(newIds));
+    }
+
+    public void ArrayPolarActive(int count, double radius)
+    {
+        var ids = ResolveActiveObjectIds();
+        if (ids.Count == 0 || count <= 1) return;
+        var center = GetSelectionCenter(ids);
+        var newIds = new List<Guid>();
+        for (var i = 1; i < count; i++)
+        {
+            var a = 2.0 * Math.PI * i / count;
+            var move = Transform.Translation(
+                center.X + Math.Cos(a) * radius - center.X,
+                center.Y + Math.Sin(a) * radius - center.Y,
+                0
+            );
+            newIds.AddRange(DuplicateWithTransform(ids, move));
+        }
+        SetActive(ids.Concat(newIds));
+    }
+
+    private Guid? TrackNew(Guid id)
+    {
+        if (id == Guid.Empty) return null;
+        SetActive(new[] { id });
+        return id;
+    }
+
+    private void SetActive(IEnumerable<Guid> ids)
+    {
+        _activeObjectIds.Clear();
+        foreach (var id in ids.Where(id => id != Guid.Empty))
+        {
+            _activeObjectIds.Add(id);
+        }
+    }
+
+    private List<Guid> ResolveActiveObjectIds()
+    {
+        var selected = _doc.Objects.GetSelectedObjects(false, false)
+            .Select(o => o.Id)
+            .ToList();
+        if (selected.Count > 0) return selected;
+        return _activeObjectIds
+            .Where(id => _doc.Objects.FindId(id) is not null)
+            .ToList();
+    }
+
+    private void ApplyTransform(IEnumerable<Guid> ids, Transform xform)
+    {
+        foreach (var id in ids)
+        {
+            _doc.Objects.Transform(id, xform, false);
+        }
+    }
+
+    private IEnumerable<Guid> DuplicateWithTransform(IEnumerable<Guid> ids, Transform xform)
+    {
+        foreach (var id in ids)
+        {
+            var rhObj = _doc.Objects.FindId(id);
+            if (rhObj is null) continue;
+            var geometry = rhObj.Geometry.Duplicate();
+            if (geometry is null) continue;
+            geometry.Transform(xform);
+            var nid = _doc.Objects.Add(geometry);
+            if (nid != Guid.Empty) yield return nid;
+        }
+    }
+
+    private Point3d GetSelectionCenter(IEnumerable<Guid> ids)
+    {
+        BoundingBox? bbox = null;
+        foreach (var id in ids)
+        {
+            var rhObj = _doc.Objects.FindId(id);
+            if (rhObj is null) continue;
+            var gb = rhObj.Geometry.GetBoundingBox(true);
+            bbox = bbox is null ? gb : BoundingBox.Union(bbox.Value, gb);
+        }
+        return bbox?.Center ?? Point3d.Origin;
     }
 
     public void Redraw() => _doc.Views.Redraw();
@@ -228,6 +385,18 @@ public sealed class RhinoCommandAdapter : IRhinoCommandAdapter
         AddedGeometry.Add($"point:({x},{y},{z})");
         return Guid.NewGuid();
     }
+
+    public void MoveActive(double x, double y, double z) => OutputLog.Add($"move:{x},{y},{z}");
+
+    public void RotateActive(double degrees, string axis) => OutputLog.Add($"rotate:{degrees},{axis}");
+
+    public void ScaleActive(double factor) => OutputLog.Add($"scale:{factor}");
+
+    public void ArrayLinearActive(int count, double spacing, string axis) => OutputLog.Add($"array_linear:{count},{spacing},{axis}");
+
+    public void ArrayGridActive(int countX, int countY, double spacing) => OutputLog.Add($"array_grid:{countX},{countY},{spacing}");
+
+    public void ArrayPolarActive(int count, double radius) => OutputLog.Add($"array_polar:{count},{radius}");
 
     public void Redraw() { }
 }
