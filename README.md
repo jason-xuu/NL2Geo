@@ -16,6 +16,8 @@ See `docs/architecture.md` for module responsibilities and flow.
 
 ## Build and test
 
+**Interview (macOS):** double-click `../interview-demos/NL2Geo - Open in Finder.command` to jump to this repo in Finder (real testing is still inside Rhino). See `interview-demos/README.md`.
+
 Prerequisites:
 
 - .NET 7 SDK
